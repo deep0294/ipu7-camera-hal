@@ -16,6 +16,7 @@
 
 #pragma once
 #include <algorithm>
+#include <cstddef>
 
 #include "ParamDataType.h"
 #include "BufferQueue.h"
@@ -77,6 +78,8 @@ class CameraStream : public BufferConsumer, public EventSource {
     virtual int onBufferAvailable(uuid port, const std::shared_ptr<CameraBuffer>& camBuffer);
 #ifdef LINUX_PRIVACY_MODE
     virtual void setBufferProducer(BufferProducer* producer);
+    virtual void setBufferProducer(BufferProducer* producer, bool transferInFlightBuffers);
+    size_t discardInFlightBuffers(const char* reason, const char* oldProducerType);
 #endif
 
  private:
@@ -103,4 +106,3 @@ class CameraStream : public BufferConsumer, public EventSource {
 };
 
 }  // namespace icamera
-

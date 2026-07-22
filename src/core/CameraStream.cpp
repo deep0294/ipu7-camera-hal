@@ -57,6 +57,11 @@ int CameraStream::stop() {
 
     AutoMutex poolLock(mBufferPoolLock);
 #ifdef LINUX_PRIVACY_MODE
+    size_t discarded = mBufferInProcessing.size();
+    if (discarded > 0) {
+        LOG2("<id%d>@%s: stop discarding %zu in-flight buffers for streamId:%d", mCameraId,
+             __func__, discarded, mStreamId);
+    }
     mBufferInProcessing.clear();
 #else
     mBufferInProcessing = 0;
@@ -158,35 +163,68 @@ int CameraStream::qbuf(camera_buffer_t* ubuffer, int64_t sequence, bool addExtra
 #ifdef LINUX_PRIVACY_MODE
 // This function is called in stop status, no lock
 void CameraStream::setBufferProducer(BufferProducer* producer) {
+    setBufferProducer(producer, false);
+}
+
+void CameraStream::setBufferProducer(BufferProducer* producer, bool transferInFlightBuffers) {
     BufferProducer* oldProducer = mBufferProducer;
+    size_t discarded = 0;
+    size_t inFlight = 0;
 
     // If we had a previous producer, remove ourselves as a listener
     if (oldProducer != nullptr) {
         oldProducer->removeFrameAvailableListener(this);
     }
-    
-    mBufferProducer = producer;
 
-    if (producer != nullptr) {
-        producer->addFrameAvailableListener(this);
-        
-        // If we had a previous producer and there are buffers being processed,
-        // transfer them to the new producer
-        if (oldProducer != nullptr) {
+    if (oldProducer != nullptr && oldProducer != producer) {
+        if (transferInFlightBuffers && producer != nullptr) {
             AutoMutex l(mBufferPoolLock);
-            // Queue all processing buffers to the new producer
             for (auto& buffer : mBufferInProcessing) {
                 int ret = producer->qbuf(mPort, buffer);
                 if (ret == OK) {
-                    LOG2("<id%d>@%s: Transferred buffer %p to new producer", 
-                         mCameraId, __func__, buffer.get());
+                    LOG2("<id%d>@%s: transfer in-flight buffer %p to new producer %p", mCameraId,
+                         __func__, buffer.get(), producer);
                 } else {
-                    LOGE("<id%d>@%s: Failed to transfer buffer %p to new producer, ret=%d",
-                         mCameraId, __func__, buffer.get(), ret);
+                    LOGE("<id%d>@%s: failed to transfer in-flight buffer %p to new producer %p, ret=%d",
+                         mCameraId, __func__, buffer.get(), producer, ret);
                 }
             }
+        } else {
+            discarded = discardInFlightBuffers("producer switch", "unknown");
         }
     }
+
+    mBufferProducer = producer;
+    if (producer != nullptr) {
+        producer->addFrameAvailableListener(this);
+    }
+    {
+        AutoMutex l(mBufferPoolLock);
+        inFlight = mBufferInProcessing.size();
+    }
+
+    LOG2("<id%d>@%s: streamId:%d oldProducer:%p newProducer:%p transferInFlightBuffers:%d "
+         "discarded:%zu inFlight:%zu",
+         mCameraId, __func__, mStreamId, oldProducer, producer, transferInFlightBuffers ? 1 : 0,
+         discarded, inFlight);
+}
+
+size_t CameraStream::discardInFlightBuffers(const char* reason, const char* oldProducerType) {
+    AutoMutex l(mBufferPoolLock);
+    size_t discarded = mBufferInProcessing.size();
+
+    if (discarded > 0) {
+        LOG1("<id%d>@%s: discard %zu in-flight buffers for streamId:%d, oldProducerType:%s, reason:%s",
+             mCameraId, __func__, discarded, mStreamId,
+             oldProducerType ? oldProducerType : "unknown", reason ? reason : "unknown");
+    } else {
+        LOG2("<id%d>@%s: no in-flight buffers to discard for streamId:%d, oldProducerType:%s, reason:%s",
+             mCameraId, __func__, mStreamId, oldProducerType ? oldProducerType : "unknown",
+             reason ? reason : "unknown");
+    }
+
+    mBufferInProcessing.clear();
+    return discarded;
 }
 #endif
 
@@ -227,6 +265,9 @@ int CameraStream::onBufferAvailable(uuid port, const shared_ptr<CameraBuffer>& c
     auto it = std::find(mBufferInProcessing.begin(), mBufferInProcessing.end(), camBuffer);
     if (it != mBufferInProcessing.end()) {
         mBufferInProcessing.erase(it);
+    } else {
+        LOG2("<id%d>@%s: streamId:%d buffer %p not tracked in processing list, possible switch drain",
+             mCameraId, __func__, mStreamId, camBuffer.get());
     }
 
     LOG2("%s, buffer in processing: %zu for stream: %p", __func__, mBufferInProcessing.size(), this);

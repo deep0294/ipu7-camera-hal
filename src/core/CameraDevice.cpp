@@ -1073,6 +1073,7 @@ int CameraDevice::stopLocked() {
 void CameraDevice::switchToNormal() {
     LOG2("%s", __func__);
     AutoMutex m(mDeviceLock);
+    size_t discardedBufferCount = 0;
 
     (void)mBackupProducer->stop();
 
@@ -1086,12 +1087,16 @@ void CameraDevice::switchToNormal() {
         mProcessingUnit->setBufferProducer(mProducer);
     }
     for (const auto& item : mStreamIdToPortMap) {
+        discardedBufferCount +=
+            mStreams[item.first]->discardInFlightBuffers("switchToNormal", "backup producer");
         if (mProcessingUnit != nullptr) {
-            mStreams[item.first]->setBufferProducer(mProcessingUnit);
+            mStreams[item.first]->setBufferProducer(mProcessingUnit, false);
         } else {
-            mStreams[item.first]->setBufferProducer(mProducer);
+            mStreams[item.first]->setBufferProducer(mProducer, false);
         }
     }
+    LOG1("%s: discarded %zu in-flight buffers before switching streams back to normal producer",
+         __func__, discardedBufferCount);
     if (mProcessingUnit != nullptr) {
         (void)mProcessingUnit->start();
     }
@@ -1110,6 +1115,7 @@ void CameraDevice::switchToNormal() {
 void CameraDevice::switchToBackup() {
     LOG2("%s", __func__);
     AutoMutex m(mDeviceLock);
+    size_t discardedBufferCount = 0;
     m3AControl->stop();
 
     (void)mSofSource->stop();
@@ -1128,8 +1134,12 @@ void CameraDevice::switchToBackup() {
     mBackupProducer->registerListener(EVENT_ISYS_SOF, mRequestThread);
     mBackupProducer->registerListener(EVENT_ISYS_FRAME, mRequestThread);
     for (const auto& item : mStreamIdToPortMap) {
-        mStreams[item.first]->setBufferProducer(mBackupProducer);
+        discardedBufferCount += mStreams[item.first]->discardInFlightBuffers(
+            "switchToBackup", mProcessingUnit != nullptr ? "processing unit" : "capture unit");
+        mStreams[item.first]->setBufferProducer(mBackupProducer, false);
     }
+    LOG1("%s: discarded %zu in-flight buffers before switching streams to backup producer",
+         __func__, discardedBufferCount);
 
     (void)mBackupProducer->start();
 }
