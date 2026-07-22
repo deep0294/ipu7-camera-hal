@@ -169,21 +169,21 @@ void CameraStream::setBufferProducer(BufferProducer* producer) {
 
     if (producer != nullptr) {
         producer->addFrameAvailableListener(this);
-        
-        // If we had a previous producer and there are buffers being processed,
-        // transfer them to the new producer
-        if (oldProducer != nullptr) {
-            AutoMutex l(mBufferPoolLock);
-            // Queue all processing buffers to the new producer
-            for (auto& buffer : mBufferInProcessing) {
-                int ret = producer->qbuf(mPort, buffer);
-                if (ret == OK) {
-                    LOG2("<id%d>@%s: Transferred buffer %p to new producer", 
-                         mCameraId, __func__, buffer.get());
-                } else {
-                    LOGE("<id%d>@%s: Failed to transfer buffer %p to new producer, ret=%d",
-                         mCameraId, __func__, buffer.get(), ret);
-                }
+    }
+
+    // If we had a previous producer and there are buffers being processed,
+    // transfer them to the new producer
+    if (oldProducer != nullptr && producer != nullptr) {
+        AutoMutex l(mBufferPoolLock);
+        // Queue all processing buffers to the new producer
+        for (auto& buffer : mBufferInProcessing) {
+            int ret = producer->qbuf(mPort, buffer);
+            if (ret == OK) {
+                LOG2("<id%d>@%s: Transferred buffer %p to new producer", 
+                     mCameraId, __func__, buffer.get());
+            } else {
+                LOGE("<id%d>@%s: Failed to transfer buffer %p to new producer, ret=%d",
+                     mCameraId, __func__, buffer.get(), ret);
             }
         }
     }

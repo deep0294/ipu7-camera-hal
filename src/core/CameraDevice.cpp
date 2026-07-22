@@ -452,10 +452,13 @@ int CameraDevice::configure(stream_config_t* streamList) {
 #ifdef LINUX_PRIVACY_MODE
     int eventType = PlatformData::getPrivacyShutterEventType(mCameraId);
     int eventCode = PlatformData::getPrivacyShutterEventCode(mCameraId);
+    LOG1("@%s platform config: eventType=%d, eventCode=%d", __func__, eventType, eventCode);
     if (eventType < 0 || eventCode < 0) {
         LOG1("@%s Privacy shutter is not configured", __func__);
     } else {
         ret = mPrivacyShutter->configure(eventType, eventCode);
+        LOG1("@%s Privacy shutter configure result=%d, isConfigured=%d", __func__, ret,
+             mPrivacyShutter->isConfigured());
         CheckAndLogError(ret < 0, ret, "@%s Privacy shutter configure failed", __func__);
     }
 #endif
@@ -495,6 +498,7 @@ int CameraDevice::configure(stream_config_t* streamList) {
             mProcessingUnit->setBufferProducer(mProducer);
 #ifdef LINUX_PRIVACY_MODE
             if (mPrivacyShutter->isConfigured()) {
+                LOG1("@%s Configuring backup producer with processor", __func__);
                 ret = mBackupProducer->configure(outputConfigs);
                 CheckAndLogError(ret < 0, BAD_VALUE, "@%s Dummy image producer Configure failed", __func__);
             }
@@ -503,6 +507,7 @@ int CameraDevice::configure(stream_config_t* streamList) {
 #ifdef LINUX_PRIVACY_MODE
     } else {
         if (mPrivacyShutter->isConfigured()) {
+            LOG1("@%s Configuring backup producer without processor", __func__);
             ret = mBackupProducer->configure(producerConfigs);
             CheckAndLogError(ret < 0, BAD_VALUE, "@%s Dummy image producer Configure failed", __func__);
         }
@@ -835,10 +840,11 @@ int CameraDevice::start() {
 
 #ifdef LINUX_PRIVACY_MODE
     if (mPrivacyShutter->isConfigured()) {
-        if (mPrivacyShutter->getValue() == 0) {
+        mPrivacyShutter->start();
+        LOG1("@%s Privacy shutter started, value=%d", __func__, mPrivacyShutter->getValue());
+        if (mPrivacyShutter->getValue() == 1) {
             switchToBackup();
         }
-        mPrivacyShutter->start();
     }
 #endif
 
@@ -848,19 +854,29 @@ int CameraDevice::start() {
 int CameraDevice::stop() {
     PERF_CAMERA_ATRACE();
     LOG1("<id%d>@%s, mState:%d", mCameraId, __func__, mState);
-    AutoMutex m(mDeviceLock);
 
-    mRequestThread->clearRequests();
+    {
+        AutoMutex m(mDeviceLock);
 
-    m3AControl->stop();
-    mLensCtrl->stop();
+        mRequestThread->clearRequests();
 
-    if (mState == DEVICE_START) {
-        (void)stopLocked();
+        m3AControl->stop();
+        mLensCtrl->stop();
+
+        if (mState == DEVICE_START) {
+            (void)stopLocked();
+        }
+
+        mScheduler->stop();
+        mState = DEVICE_STOP;
     }
 
-    mScheduler->stop();
-    mState = DEVICE_STOP;
+#ifdef LINUX_PRIVACY_MODE
+    if (mPrivacyShutter->isConfigured()) {
+        LOG1("@%s Stopping privacy shutter", __func__);
+        mPrivacyShutter->stop();
+    }
+#endif
 
     return OK;
 }
@@ -1057,12 +1073,12 @@ int CameraDevice::stopLocked() {
     mCsiMetaDevice->stop();
     // CSI_META_E
 
-    // Stop the CaptureUnit for streamon
-    mProducer->stop();
-
     if (mProcessingUnit != nullptr) {
         mProcessingUnit->stop();
     }
+
+    // Stop the CaptureUnit for streamon
+    mProducer->stop();
 
     unbindListeners();
 
@@ -1071,7 +1087,7 @@ int CameraDevice::stopLocked() {
 
 #ifdef LINUX_PRIVACY_MODE
 void CameraDevice::switchToNormal() {
-    LOG2("%s", __func__);
+    LOG1("%s", __func__);
     AutoMutex m(mDeviceLock);
 
     (void)mBackupProducer->stop();
@@ -1080,6 +1096,13 @@ void CameraDevice::switchToNormal() {
 
     mBackupProducer->removeListener(EVENT_ISYS_FRAME, mRequestThread);
     mBackupProducer->removeListener(EVENT_ISYS_SOF, mRequestThread);
+
+    vector<EventListener*> sofListenerList = m3AControl->getSofEventListener();
+    for (auto sofListener : sofListenerList) {
+        mSofSource->registerListener(EVENT_ISYS_SOF, sofListener);
+    }
+    mSofSource->registerListener(EVENT_ISYS_SOF, mRequestThread);
+    mProducer->registerListener(EVENT_ISYS_FRAME, mRequestThread);
 
     mScheduler->start();
     if (mProcessingUnit != nullptr) {
@@ -1108,9 +1131,17 @@ void CameraDevice::switchToNormal() {
 }
 
 void CameraDevice::switchToBackup() {
-    LOG2("%s", __func__);
+    LOG1("%s", __func__);
     AutoMutex m(mDeviceLock);
+    mRequestThread->clearRequests();
     m3AControl->stop();
+
+    vector<EventListener*> sofListenerList = m3AControl->getSofEventListener();
+    for (auto sofListener : sofListenerList) {
+        mSofSource->removeListener(EVENT_ISYS_SOF, sofListener);
+    }
+    mSofSource->removeListener(EVENT_ISYS_SOF, mRequestThread);
+    mProducer->removeListener(EVENT_ISYS_FRAME, mRequestThread);
 
     (void)mSofSource->stop();
 
@@ -1123,13 +1154,14 @@ void CameraDevice::switchToBackup() {
         mProcessingUnit->stop();
     }
     mScheduler->stop();
-    mRequestThread->resetSequence();
 
     mBackupProducer->registerListener(EVENT_ISYS_SOF, mRequestThread);
     mBackupProducer->registerListener(EVENT_ISYS_FRAME, mRequestThread);
     for (const auto& item : mStreamIdToPortMap) {
         mStreams[item.first]->setBufferProducer(mBackupProducer);
     }
+    mRequestThread->clearRequests();
+    mRequestThread->resetSequence();
 
     (void)mBackupProducer->start();
 }
@@ -1197,7 +1229,8 @@ void CameraDevice::handleEvent(EventData eventData) {
 
 #ifdef LINUX_PRIVACY_MODE
         case EVENT_INPUT_EVENT:
-            if (eventData.data.inputEvent.value == 0) {
+            LOG1("%s, received input event value=%d", __func__, eventData.data.inputEvent.value);
+            if (eventData.data.inputEvent.value == 1) {
                 switchToBackup();
             } else {
                 switchToNormal();

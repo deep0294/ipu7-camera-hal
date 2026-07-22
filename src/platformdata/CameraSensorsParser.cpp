@@ -927,6 +927,8 @@ void CameraSensorsParser::parseSensorSection(const Json::Value& node) {
     }
     if (node.isMember("privacyShutterEventCode")) {
         mCurCam->mPrivacyShutterEventCode = node["privacyShutterEventCode"].asInt();
+        LOGI("@%s Parsed privacy shutter config: eventType=%d, eventCode=%d", __func__,
+             mCurCam->mPrivacyShutterEventType, mCurCam->mPrivacyShutterEventCode);
     }
 #endif
 }

@@ -132,6 +132,7 @@ int PipeLine::stop() {
     LOG1("<id%d>@%s stream %d", mCameraId, __func__, mStreamId);
 
     mPSysDevice->closeGraph();
+    mPSysDevice->deinit();
 
     for (auto& unit : mPSUnit) {
         int ret = unit.pipeStage->stop();

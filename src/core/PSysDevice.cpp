@@ -85,7 +85,6 @@ PSysDevice::~PSysDevice() {
 }
 
 void PSysDevice::deinit() {
-    mPollThread->exit();
     mExitPending = true;
 
     // Wake up poll thread
@@ -96,6 +95,8 @@ void PSysDevice::deinit() {
             LOGW("Failed to interrupt event %s", strerror(errno));
         }
     }
+
+    mPollThread->exit();
 }
 
 int PSysDevice::init() {
