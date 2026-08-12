@@ -46,6 +46,7 @@ static const uint8_t U32_BITS = sizeof(uint32_t) * 8;
 // The kernel copies event bitmaps in whole longs, so a bitmap sized exactly for SW_MAX or
 // EV_MAX is too small. KEY_MAX is the largest bitmap and its size is a multiple of a long.
 static const uint32_t BITMAP_WORDS = (KEY_MAX / U32_BITS) + 1U;
+static const size_t PHYS_PATH_MAX_LEN = 256;
 
 InputEventMonitor::InputEventMonitor() : mCheckThread(nullptr),
                                          mEventType(-1),
@@ -102,6 +103,25 @@ int InputEventMonitor::configure(int eventType, int eventCode) {
     while ((entry = readdir(dir)) != NULL) {
         if (strncmp(entry->d_name, "event", 5) == 0) {
             std::string devicePath = std::string("/dev/input/") + entry->d_name;
+
+            int tmpFd = ::open(devicePath.c_str(), O_RDONLY);
+            if (tmpFd < 0) {
+                LOGE("open %s fail: %d, errno: %d", devicePath.c_str(), tmpFd, errno);
+                continue;
+            }
+            char physPath[PHYS_PATH_MAX_LEN] = {0};
+            bool isVirtual = (ioctl(tmpFd, EVIOCGPHYS(sizeof(physPath)), physPath) < 0)
+                             || (physPath[0] == '\0');
+            struct input_id inputId = {};
+            if (!isVirtual && (ioctl(tmpFd, EVIOCGID, &inputId) < 0)) {
+                isVirtual = true;
+            }
+            ::close(tmpFd);
+            if (isVirtual || (inputId.bustype == BUS_VIRTUAL)) {
+                LOG1("Skip virtual device %s", devicePath.c_str());
+                continue;
+            }
+
             if (checkDeviceCapabilities(devicePath, eventType, eventCode)) {
                 int status = ::open(devicePath.c_str(), O_RDONLY);
                 if (status >= 0) {
