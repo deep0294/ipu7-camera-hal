@@ -144,18 +144,25 @@ int PipeLine::start() {
                          unit.pipeStage->getName());
     }
 
-    int ret = mPSysDevice->addGraph(mPSysGraph);
 #ifdef LINUX_PRIVACY_MODE
+    int ret = mPSysDevice->addGraph(mPSysGraph);
     // Resume polling only once the graph is open, so completion events are not missed.
     mPSysDevice->resumePolling();
-#endif
     return ret;
+#else
+    return mPSysDevice->addGraph(mPSysGraph);
+#endif
 }
 
 int PipeLine::stop() {
     LOG1("<id%d>@%s stream %d", mCameraId, __func__, mStreamId);
 
 #ifdef LINUX_PRIVACY_MODE
+    // Already stopped since the last start: the graph is closed and the psys device released.
+    if (mNeedReinitAic) {
+        return OK;
+    }
+
     // Drain in-flight PSys tasks before closing the graph, or the firmware gets stuck.
     mPSysDevice->suspendPolling();
 #endif
@@ -168,11 +175,10 @@ int PipeLine::stop() {
     }
 
 #ifdef LINUX_PRIVACY_MODE
-    // Release the psys device after every stage has unmapped its buffers through it.
+    // Release the psys device: the kernel drops all buffer mappings and the runtime PM
+    // reference.
     mPSysDevice->closeDev();
-#endif
 
-#ifdef LINUX_PRIVACY_MODE
     // The graph is torn down with PSys tasks still in flight, so their CCA statistics
     // slots are never decoded and never freed. decodeStats never ran for them, so they
     // cannot be detected here and CCA would run out of slots after a few cycles.

@@ -105,6 +105,20 @@ int BufferQueue::qbuf(uuid port, const std::shared_ptr<CameraBuffer>& camBuffer)
 
     CameraBufQ& output = mOutputQueue[port];
     output.push(camBuffer);
+#ifdef LINUX_PRIVACY_MODE
+    // Wake the processing thread only if an input frame is already waiting for this buffer,
+    // so a wait for the next input frame is not cut short.
+    bool inputPending = !mInputQueue.empty();
+    for (const auto& input : mInputQueue) {
+        if (input.second.empty()) {
+            inputPending = false;
+            break;
+        }
+    }
+    if (inputPending) {
+        mFrameAvailableSignal.notify_one();
+    }
+#endif
 
     return OK;
 }
@@ -247,13 +261,6 @@ void BufferQueue::returnBuffers(std::map<uuid, std::shared_ptr<CameraBuffer> >& 
 int BufferQueue::allocProducerBuffers(int camId, int bufNum) {
     LOG1("%s: buffer queue size %d", __func__, bufNum);
 
-    for (auto& item : mInternalBuffers) {
-        for (auto& buf : item.second) {
-            if (buf != nullptr) {
-                buf->freeMemory();
-            }
-        }
-    }
     mInternalBuffers.clear();
 
     CheckAndLogError(mBufferProducer == nullptr, BAD_VALUE, "@%s: Buffer Producer is nullptr",

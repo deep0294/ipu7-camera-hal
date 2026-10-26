@@ -138,10 +138,6 @@ void CaptureUnit::destroyDevices() {
     LOG1("<id%d>%s", mCameraId, __func__);
 
     for (auto device : mDevices) {
-#ifdef LINUX_PRIVACY_MODE
-        // Release buffer pool before closing device.
-        device->releaseBuffers();
-#endif
         device->closeDevice();
         delete device;
     }

@@ -139,19 +139,27 @@ int CameraStream::qbuf(camera_buffer_t* ubuffer, int64_t sequence, bool addExtra
     }
 
     int ret = BAD_VALUE;
+#ifdef LINUX_PRIVACY_MODE
     // GstBuffer release can race with redirectBufferProducer() on another thread
     // (e.g. a shutter switch), so mBufferProducer must not be read without the lock.
     AutoMutex l(mBufferPoolLock);
     if (mBufferProducer != nullptr) {
         ret = mBufferProducer->qbuf(mPort, camBuffer);
-        if (ret == OK) {
-#ifdef LINUX_PRIVACY_MODE
+        // An empty placeholder buffer is never delivered back, so do not track it.
+        if ((ret == OK) && (camBuffer != nullptr)) {
             mBufferInProcessing.push_back(camBuffer);
-#else
-            mBufferInProcessing++;
-#endif
         }
     }
+#else
+    // mBufferProducer will not change after start, no lock
+    if (mBufferProducer != nullptr) {
+        ret = mBufferProducer->qbuf(mPort, camBuffer);
+        if (ret == OK) {
+            AutoMutex l(mBufferPoolLock);
+            mBufferInProcessing++;
+        }
+    }
+#endif
     return ret;
 }
 
@@ -175,6 +183,9 @@ int CameraStream::redirectBufferProducer(BufferProducer* producer) {
     mBufferInProcessing.clear();
 
     for (auto& buffer : buffersToTransfer) {
+        if (buffer == nullptr) {
+            continue;
+        }
         // The new producer starts a new sequence epoch, so a settingSequence from the
         // previous one would stall the buffer in needExecutePipe() until the input
         // sequence caught up. -1 means no particular input frame is required.
@@ -210,6 +221,7 @@ int CameraStream::onBufferAvailable(uuid port, const shared_ptr<CameraBuffer>& c
     // Update the user buffer info before return back
     camBuffer->updateUserBuffer();
 
+#ifdef LINUX_PRIVACY_MODE
     camera_buffer_t* ubuffer = camBuffer->getUserBuffer();
     LOG2("ubuffer:%p, addr:%p, timestamp:%lu, sequence:%ld", ubuffer, ubuffer->addr,
          ubuffer->timestamp, ubuffer->sequence);
@@ -219,20 +231,15 @@ int CameraStream::onBufferAvailable(uuid port, const shared_ptr<CameraBuffer>& c
                               camBuffer->getVirtualChannel());
 
     {
+        // Remove the buffer before it is returned to the app, otherwise an immediate
+        // re-queue of the same buffer could be erased here.
         AutoMutex l(mBufferPoolLock);
-#ifdef LINUX_PRIVACY_MODE
         auto it = std::find(mBufferInProcessing.begin(), mBufferInProcessing.end(), camBuffer);
         if (it != mBufferInProcessing.end()) {
             mBufferInProcessing.erase(it);
         }
 
         LOG2("%s, buffer in processing: %zu for stream: %p", __func__, mBufferInProcessing.size(), this);
-#else
-        if (mBufferInProcessing > 0) {
-            mBufferInProcessing--;
-        }
-        LOG2("%s, buffer in processing: %d for stream: %p", __func__, mBufferInProcessing, this);
-#endif
     }
 
     EventFrameAvailable frameData;
@@ -242,6 +249,29 @@ int CameraStream::onBufferAvailable(uuid port, const shared_ptr<CameraBuffer>& c
     eventData.buffer = camBuffer;
     eventData.data.frameDone = frameData;
     notifyListeners(eventData);
+#else
+    EventFrameAvailable frameData;
+    frameData.streamId = mStreamId;
+    EventData eventData;
+    eventData.type = EVENT_FRAME_AVAILABLE;
+    eventData.buffer = camBuffer;
+    eventData.data.frameDone = frameData;
+    notifyListeners(eventData);
+
+    camera_buffer_t* ubuffer = camBuffer->getUserBuffer();
+    LOG2("ubuffer:%p, addr:%p, timestamp:%lu, sequence:%ld", ubuffer, ubuffer->addr,
+         ubuffer->timestamp, ubuffer->sequence);
+
+    PERF_CAMERA_ATRACE_PARAM3("sequence", camBuffer->getSequence(), "csi2_port",
+                              camBuffer->getCsi2Port(), "virtual_channel",
+                              camBuffer->getVirtualChannel());
+
+    AutoMutex l(mBufferPoolLock);
+    if (mBufferInProcessing > 0) {
+        mBufferInProcessing--;
+    }
+    LOG2("%s, buffer in processing: %d for stream: %p", __func__, mBufferInProcessing, this);
+#endif
 
     return OK;
 }

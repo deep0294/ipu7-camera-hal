@@ -81,18 +81,6 @@ int IpuPacAdaptor::reinitAic(const int32_t aicId) {
     CheckAndLogError(iaErr != ia_err_none, UNKNOWN_ERROR,
                      "%s, Failed to reinit aic, aicId: %d", __func__, aicId);
 
-    {
-        AutoMutex l2(mIpuParamLock);
-        mTerminalResult.clear();
-    }
-    mPacRunHistMap.clear();
-    mLastStatsSequence = -1;
-#ifdef LINUX_PRIVACY_MODE
-    if (mAiqResultStorage != nullptr) {
-        mAiqResultStorage->resetAiqResults();
-    }
-#endif
-
     return OK;
 }
 
@@ -147,9 +135,6 @@ void IpuPacAdaptor::clearAicResult() {
         // Drop the previous period's terminal results so getAllBuffers() cannot return them.
         AutoMutex paramLock(mIpuParamLock);
         mTerminalResult.clear();
-    }
-    if (mAiqResultStorage != nullptr) {
-        mAiqResultStorage->resetAiqResults();
     }
 #endif
 }
@@ -576,9 +561,6 @@ status_t IpuPacAdaptor::decodeStats(int streamId, uint8_t contextId, int64_t seq
         // AIC needs a few frames to prime after a restart, so failures inside that
         // window are expected.
         const bool warmingUp = (sequenceId < (PlatformData::getExposureLag(mCameraId) + 1));
-#else
-        const bool warmingUp = false;
-#endif
         if (warmingUp) {
             LOG2("<seq:%ld>%s, Failed to decode stats during warm-up. streamId: %d, "
                  "contextId: %d", sequenceId, __func__, streamId, contextId);
@@ -586,6 +568,10 @@ status_t IpuPacAdaptor::decodeStats(int streamId, uint8_t contextId, int64_t seq
             LOGE("<seq:%ld>%s, Failed to decode stats. streamId: %d, contextId: %d", sequenceId,
                  __func__, streamId, contextId);
         }
+#else
+        LOGE("<seq:%ld>%s, Failed to decode stats. streamId: %d, contextId: %d", sequenceId,
+             __func__, streamId, contextId);
+#endif
     }
 
     mPacRunHistMap[pacItem] = true;

@@ -15,7 +15,6 @@
  */
 
 #pragma once
-#include <algorithm>
 
 #include "AiqUnit.h"
 #include "CameraStream.h"
@@ -219,6 +218,7 @@ class CameraDevice : public EventListener {
     void switchToNormal();
     void switchToBackup();
     void joinIsysTeardown();
+    void stopPrivacyShutterMonitor();
 #endif
 
  private:

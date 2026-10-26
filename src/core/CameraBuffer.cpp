@@ -340,11 +340,9 @@ void CameraBuffer::updateUserBuffer(void) {
     mU->s.field = getField();
 
 #ifdef LINUX_PRIVACY_MODE
-    // In continuous live streaming with privacy mode toggling, the true hardware
-    // frame sequence (derived from ISYS/PSYS pipeline ticks) must always be used
-    // so user space (GStreamer) receives monotonically strictly increasing frame sequences.
-    // Carried-over or re-queued buffers with mSettingSequence = -1 or arbitrary settingSequence
-    // must never corrupt the output sequence number.
+    // Report the frame's own sequence. After a privacy switch the request sequence can lag
+    // the restarted frame sequence, which would repeat sequence numbers. Sequences restart
+    // at 0 on every switch.
     mU->sequence = getSequence();
 #else
     // Use valid setting sequence to align shutter/parameter with buffer

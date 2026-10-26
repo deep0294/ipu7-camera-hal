@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <cstdio>
 #include <list>
 #include <map>
 #include <memory>
@@ -104,10 +103,12 @@ class CBStage : public IPipeStage, public IPSysDeviceCallback {
                                        cca::cca_cb_kernel_offset& offsets);
     int pacConfig(const StaticGraphNodeKernels& kernelGroup, aic::IaAicBuffer** iaAicPtr,
                   std::unordered_map<uint8_t, TerminalConfig>& terminalConfig,
+#ifdef LINUX_PRIVACY_MODE
                   PacTerminalBufMap& termBufMap,
                   bool reinit = false);
-#ifdef LINUX_PRIVACY_MODE
     int reapplyPacConfig();
+#else
+                  PacTerminalBufMap& termBufMap);
 #endif
     int allocPayloadBuffer(const cca::cca_aic_terminal_config& pacConfig,
                            std::unordered_map<uint8_t, TerminalConfig>& terminalConfig);
@@ -187,10 +188,6 @@ class CBStage : public IPipeStage, public IPSysDeviceCallback {
     std::unordered_multimap<int64_t, TerminalBuffer> mSeqToTerminalBufferMaps;
 
 #ifdef LINUX_PRIVACY_MODE
-    // Frame terminal buffers registered with PSysDevice, keyed by their psys fd.
-    // Dropped in stop() because the ISYS buffers are re-mmap'd at the same addresses.
-    std::unordered_map<int, TerminalBuffer> mFrameTerminalBuffers;
-
     // Kept from configure() so reapplyPacConfig() can redo configAic + registerAicBuf.
     const StaticGraphNodeKernels* mKernelGroup = nullptr;
     std::unordered_map<uint8_t, TerminalConfig> mStoredTerminalConfig;

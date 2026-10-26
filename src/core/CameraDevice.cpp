@@ -18,8 +18,9 @@
 
 #include "CameraDevice.h"
 
-#include <unistd.h>
-#include <thread>
+#ifdef LINUX_PRIVACY_MODE
+#include <algorithm>
+#endif
 #include <vector>
 
 #include "iutils/CameraLog.h"
@@ -40,7 +41,6 @@
 using std::vector;
 
 namespace icamera {
-
 CameraDevice::CameraDevice(int cameraId)
         : mState(DEVICE_UNINIT),
           mProcessingUnit(nullptr),
@@ -90,13 +90,13 @@ CameraDevice::CameraDevice(int cameraId)
 CameraDevice::~CameraDevice() {
     PERF_CAMERA_ATRACE();
     LOG1("<id%d>@%s", mCameraId, __func__);
+#ifdef LINUX_PRIVACY_MODE
+    stopPrivacyShutterMonitor();
+#endif
     AutoMutex m(mDeviceLock);
 
 #ifdef LINUX_PRIVACY_MODE
     joinIsysTeardown();
-    if (mPrivacyShutter->isConfigured()) {
-        mPrivacyShutter->stop();
-    }
 #endif
 
     // Clear the media control when close the device.
@@ -167,6 +167,9 @@ int CameraDevice::init() {
 void CameraDevice::deinit() {
     PERF_CAMERA_ATRACE();
     LOG1("<id%d>@%s, mState:%d", mCameraId, __func__, mState);
+#ifdef LINUX_PRIVACY_MODE
+    stopPrivacyShutterMonitor();
+#endif
     AutoMutex m(mDeviceLock);
 
 #ifdef LINUX_PRIVACY_MODE
@@ -330,7 +333,7 @@ int CameraDevice::configureInput(const stream_t* inputConfig) {
 int CameraDevice::configure(stream_config_t* streamList) {
     PERF_CAMERA_ATRACE();
     CheckAndLogError(streamList->streams == nullptr, BAD_VALUE, "%s: No valid stream config", __func__);
-    CheckAndLogError(((streamList->num_streams > static_cast<int>(MAX_STREAM_NUMBER)) ||
+    CheckAndLogError(((streamList->num_streams > MAX_STREAM_NUMBER) ||
                       (streamList->num_streams <= 0)), BAD_VALUE,
                       "%s: The stream number(%d) out of range: [1-%d]", __func__,
                      streamList->num_streams, MAX_STREAM_NUMBER);
@@ -456,6 +459,9 @@ int CameraDevice::configure(stream_config_t* streamList) {
     int eventCode = PlatformData::getPrivacyShutterEventCode(mCameraId);
     if (eventType < 0 || eventCode < 0) {
         LOG1("@%s Privacy shutter is not configured", __func__);
+    } else if (dynamic_cast<CaptureUnit*>(mProducer) == nullptr) {
+        // The privacy switch tears down and re-creates the ISYS capture devices.
+        LOG1("@%s Privacy shutter needs the ISYS capture unit, not enabled", __func__);
     } else {
         ret = mPrivacyShutter->configure(eventType, eventCode);
         CheckAndLogError(ret < 0, ret, "@%s Privacy shutter configure failed", __func__);
@@ -843,8 +849,8 @@ int CameraDevice::start() {
         }
 
         if (startInBackup) {
+            // The lens stays open, as in switchToBackup(): switchToNormal() only restarts 3A.
             m3AControl->stop();
-            mLensCtrl->stop();
             mRequestThread->setBackupModeActive(true);
             mRequestThread->resetSequence();
             mBackupProducer->registerListener(EVENT_ISYS_SOF, mRequestThread);
@@ -884,6 +890,9 @@ int CameraDevice::start() {
 int CameraDevice::stop() {
     PERF_CAMERA_ATRACE();
     LOG1("<id%d>@%s, mState:%d", mCameraId, __func__, mState);
+#ifdef LINUX_PRIVACY_MODE
+    stopPrivacyShutterMonitor();
+#endif
     AutoMutex m(mDeviceLock);
 
 #ifdef LINUX_PRIVACY_MODE
@@ -902,13 +911,6 @@ int CameraDevice::stop() {
 
     mScheduler->stop();
     mState = DEVICE_STOP;
-
-#ifdef LINUX_PRIVACY_MODE
-    if (mPrivacyShutter->isConfigured()) {
-        mPrivacyShutter->stop();
-        mPrivacyShutter->removeListener(EVENT_INPUT_EVENT, this);
-    }
-#endif
 
     return OK;
 }
@@ -937,19 +939,29 @@ int CameraDevice::dqbuf(int streamId, camera_buffer_t** ubuffer) {
     PERF_CAMERA_ATRACE();
     LOG2("<id%d>@%s, stream id:%d", mCameraId, __func__, streamId);
 
+#ifdef LINUX_PRIVACY_MODE
+    // Do not hold mDeviceLock while waiting for a frame, otherwise a privacy switch
+    // (which takes mDeviceLock) is blocked until the 5 s frame wait times out.
+    // Check the state only after a timeout, so a frame that did arrive is not dropped.
     int ret = OK;
     do {
         ret = mRequestThread->waitFrame(streamId, ubuffer);
-        {
+        if (ret == TIMED_OUT) {
             AutoMutex m(mDeviceLock);
             if (mState != DEVICE_START) {
                 return NO_INIT;
             }
         }
     } while (ret == TIMED_OUT);
+#else
+    int ret;
+    do {
+        ret = mRequestThread->waitFrame(streamId, ubuffer);
+    } while (ret == TIMED_OUT);
+#endif
 
     if (ret == NO_INIT) {
-        return NO_INIT;
+        return ret;
     }
 
     CheckAndLogError(((*ubuffer) == nullptr) || (ret != OK),
@@ -977,8 +989,7 @@ int CameraDevice::handleQueueBuffer(int bufferNum, camera_buffer_t** ubuffer, in
             CheckAndLogError((streamIdInBuf < 0) || (streamIdInBuf > mStreamNum), BAD_VALUE,
                              "@%s: Wrong stream id %d", __func__, streamIdInBuf);
 
-            if ((buffer->s.streamType == CAMERA_STREAM_INPUT) &&
-                IS_INPUT_BUFFER(buffer->timestamp, buffer->sequence)) {
+            if (IS_INPUT_BUFFER(buffer->timestamp, buffer->sequence)) {
                 hasInput = true;
             }
             if ((buffer->s.usage == CAMERA_STREAM_PREVIEW) ||
@@ -1139,9 +1150,22 @@ void CameraDevice::joinIsysTeardown() {
     }
 }
 
+// Must be called without mDeviceLock: the monitor callback takes mDeviceLock, so waiting for
+// the monitor thread while holding it would deadlock on a concurrent shutter event.
+void CameraDevice::stopPrivacyShutterMonitor() {
+    if (mPrivacyShutter->isConfigured()) {
+        mPrivacyShutter->stop();
+        mPrivacyShutter->removeListener(EVENT_INPUT_EVENT, this);
+    }
+}
+
 // Shutter opened: tear the backup path down and bring the live ISYS/PSYS path back.
 void CameraDevice::switchToNormal() {
     LOG1("<id%d>@%s", mCameraId, __func__);
+    // Wait for the background ISYS teardown before taking mDeviceLock: it can take seconds
+    // (FW flush/close timeouts), and qbuf/dqbuf need the lock to keep the dummy frames flowing.
+    // Only this listener thread starts a teardown, so none can start before the lock is taken.
+    joinIsysTeardown();
     AutoMutex m(mDeviceLock);
 
     if (mState != DEVICE_START || !mInBackupMode) {
@@ -1149,11 +1173,6 @@ void CameraDevice::switchToNormal() {
              mState, mInBackupMode);
         return;
     }
-
-    // Wait for any background ISYS teardown to finish before stopping backup producer.
-    // The backup producer continues streaming dummy frames so the application/sink
-    // does not experience frame starvation while background teardown completes.
-    joinIsysTeardown();
 
     // Now stop backup producer and reset sequencing for the switchover to live path.
     mBackupProducer->removeListener(EVENT_ISYS_FRAME, mRequestThread);
@@ -1180,10 +1199,6 @@ void CameraDevice::switchToNormal() {
     }
 
     mInBackupMode = false;
-
-    for (int i = 0; i < mStreamNum; i++) {
-        (void)mStreams[i]->start();
-    }
 
     // Re-attach ProcessingUnit to the new ISYS devices. The scheduler starts after
     // ProcessingUnit::start() so addNode() runs while the executor is inactive.
@@ -1270,7 +1285,6 @@ void CameraDevice::switchToBackup() {
         }
         if (sofSource != nullptr) {
             (void)sofSource->stop();
-            (void)sofSource->deinitDev();
         }
         // CSI_META_S
         if (csiMeta != nullptr) {
@@ -1301,15 +1315,15 @@ void CameraDevice::handleEvent(EventData eventData) {
     switch (eventData.type) {
         case EVENT_PROCESS_REQUEST: {
             const EventRequestData& request = eventData.data.request;
-            bool skipDataContextLookup = false;
 #ifdef LINUX_PRIVACY_MODE
             // Skip 3A context lookup when backup mode is active.
-            skipDataContextLookup = (mRequestThread != nullptr) &&
-                                     mRequestThread->isBackupModeActive();
-#endif
+            const bool skipDataContextLookup = (mRequestThread != nullptr) &&
+                                               mRequestThread->isBackupModeActive();
             if (!skipDataContextLookup &&
-                !((request.buffer[0]->s.streamType == CAMERA_STREAM_INPUT) &&
-                  IS_INPUT_BUFFER(request.buffer[0]->timestamp, request.buffer[0]->sequence))) {
+                !IS_INPUT_BUFFER(request.buffer[0]->timestamp, request.buffer[0]->sequence)) {
+#else
+            if (!IS_INPUT_BUFFER(request.buffer[0]->timestamp, request.buffer[0]->sequence)) {
+#endif
                 auto cameraContext = CameraContext::getInstance(mCameraId);
                 auto dataContext = cameraContext->getDataContextBySeq(request.settingSeq);
                 // Set test pattern mode

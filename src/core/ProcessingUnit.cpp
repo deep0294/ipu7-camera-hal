@@ -160,37 +160,37 @@ int ProcessingUnit::start() {
 
 void ProcessingUnit::stop() {
     PERF_CAMERA_ATRACE();
+    mPipeManager->stop();
 
-    if (IProcessingUnit::mThreadRunning) {
-        mPipeManager->stop();
+    IProcessingUnit::mThreadRunning = false;
+    BufferQueue::setThreadWaiting(false);
+    mProcessThread->exit();
 
-        IProcessingUnit::mThreadRunning = false;
-        BufferQueue::setThreadWaiting(false);
-        mProcessThread->exit();
-
-        {
-            AutoMutex l(mBufferQueueLock);
-            mFrameAvailableSignal.notify_one();
-        }
-
-        {
-            AutoMutex lMeta(mMetaQueueLock);
-            mMetaAvailableSignal.notify_one();
-        }
-
-        mProcessThread->wait();
+    {
+        AutoMutex l(mBufferQueueLock);
+        mFrameAvailableSignal.notify_one();
     }
 
+    {
+        AutoMutex lMeta(mMetaQueueLock);
+        mMetaAvailableSignal.notify_one();
+    }
+
+    mProcessThread->wait();
+
+#ifdef LINUX_PRIVACY_MODE
     {
         AutoMutex l(mBufferMapLock);
         mRawBufferMap.clear();
         // Thread is not running. It is safe to clear the Queue
     }
-#ifdef LINUX_PRIVACY_MODE
     {
         AutoMutex l(mBufferQueueLock);
         mSequencesInflight.clear();
     }
+#else
+    mRawBufferMap.clear();
+    // Thread is not running. It is safe to clear the Queue
 #endif
     BufferQueue::clearBufferQueues();
 }
@@ -419,6 +419,17 @@ int ProcessingUnit::processNewFrame() {
             if (outputQueue.empty()) {
                 taskReady = false;
                 LOG3("<id%d>@%s, port %d, output buffer not ready", mCameraId, __func__, port);
+#ifdef LINUX_PRIVACY_MODE
+                // An input frame is waiting for an output buffer: wait for qbuf(), a new input
+                // or stop() instead of spinning on the queues.
+                if (!srcBuffers.empty()) {
+                    (void)mFrameAvailableSignal.wait_for(lock,
+                                                         std::chrono::nanoseconds(kQueueTimeout));
+                    if (!this->mThreadRunning) {
+                        return -1;  // Already stopped
+                    }
+                }
+#endif
                 break;
             }
             dstBuffers[port] = outputQueue.front();

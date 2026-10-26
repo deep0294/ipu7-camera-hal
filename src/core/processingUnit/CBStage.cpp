@@ -80,7 +80,6 @@ int CBStage::init() {
 
 void CBStage::deInit() {
     delete[] mIaAicBuf;
-    mIaAicBuf = nullptr;
 
     // free all buffers allocated from PAC
     for (auto bufmap : mTerminalBufferMaps) {
@@ -98,23 +97,16 @@ void CBStage::deInit() {
     mTerminalBufferMaps.clear();
 
     // kernelOffset buffer do not have terminal id
-    if (mKernelOffsetBuf != nullptr) {
-        mPacAdapt->releaseBuffer(mStreamId, 0, 0, mKernelOffsetBuf);
-        mKernelOffsetBuf = nullptr;
-    }
+    mPacAdapt->releaseBuffer(mStreamId, 0, 0, mKernelOffsetBuf);
 
     for (auto& it : mNode2SelfBuffers) {
         for (auto& buf: it.second) {
-            if (buf.userPtr != nullptr) {
-                free(buf.userPtr);
-                buf.userPtr = nullptr;
-            }
+            free(buf.userPtr);
         }
     }
     mNode2SelfBuffers.clear();
     mNode2SelfLinks.clear();
 
-    mInternalOutputBuffers.clear();
     mUserToTerminalBuffer.clear();
 }
 
@@ -463,25 +455,13 @@ int CBStage::stop() {
 #endif
 
 #ifdef LINUX_PRIVACY_MODE
-    // The frame buffers are freed and re-mmap'd before the next start, and mmap hands
-    // back the same addresses. PSysDevice keys its IPU mappings on those addresses, so a
-    // surviving entry would make PSys read the previous buffer's pages.
-    {
-        std::lock_guard<std::mutex> l(mDataLock);
-        for (auto& it : mFrameTerminalBuffers) {
-            mPSysDevice->unregisterBuffer(&it.second);
-        }
-        mFrameTerminalBuffers.clear();
-    }
-
-    // Zero node2self buffers so a restart doesn't reuse stale frame data, and drop their
-    // mappings: the psys fd is about to be closed, invalidating the old handles.
+    // Zero node2self buffers so a restart does not reuse stale frame data. Their psys
+    // mappings are dropped by PSysDevice::closeDev() and recreated in start().
     for (auto& it : mNode2SelfBuffers) {
         for (auto& buf : it.second) {
             if (buf.userPtr != nullptr) {
                 memset(buf.userPtr, 0, buf.size);
             }
-            mPSysDevice->unregisterBuffer(&buf);
         }
     }
     mNode2SelfBufIndex = 0;
@@ -825,8 +805,12 @@ int CBStage::getKernelOffsetFromPayloadDesc(const StaticGraphNodeKernels& kernel
 
 int CBStage::pacConfig(const StaticGraphNodeKernels& kernelGroup, aic::IaAicBuffer** iaAicPtr,
                        std::unordered_map<uint8_t, TerminalConfig>& terminalConfig,
+#ifdef LINUX_PRIVACY_MODE
                        PacTerminalBufMap& termBufMap,
                        bool reinit) {
+#else
+                       PacTerminalBufMap& termBufMap) {
+#endif
     uint32_t* offsetPtr = mKernelOffsetBuf;
 
     cca::cca_aic_config aicConfig{};
@@ -871,11 +855,16 @@ int CBStage::pacConfig(const StaticGraphNodeKernels& kernelGroup, aic::IaAicBuff
                                    CBLayoutUtils::getStatsBufToTermIds());
     CheckAndLogError(ret != OK, ret, "Failed to config PAC");
 
+#ifdef LINUX_PRIVACY_MODE
     // Already allocated when called from reapplyPacConfig().
     if (!reinit) {
         ret = allocPayloadBuffer(pacConfig, terminalConfig);
         CheckAndLogError(ret != OK, ret, "Failed to alloc payload buffer %d", ret);
     }
+#else
+    ret = allocPayloadBuffer(pacConfig, terminalConfig);
+    CheckAndLogError(ret != OK, ret, "Failed to alloc payload buffer %d", ret);
+#endif
 
     ret = registerPayloadBuffer(iaAicPtr, termBufMap);
     CheckAndLogError(ret != OK, ret, "Failed to register buffers %d", ret);
@@ -1017,13 +1006,6 @@ int CBStage::addFrameTerminals(std::unordered_map<uint8_t, TerminalBuffer>* term
 
         int ret = mPSysDevice->registerBuffer(&terminalBuf);
         CheckAndLogError(ret != OK, ret, "Failed to register outBuffers ret %d", ret);
-
-#ifdef LINUX_PRIVACY_MODE
-        {
-            std::lock_guard<std::mutex> l(mDataLock);
-            mFrameTerminalBuffers[terminalBuf.psysBuf.base.fd] = terminalBuf;
-        }
-#endif
 
         (*terminalBuffers)[terminalId] = terminalBuf;
 

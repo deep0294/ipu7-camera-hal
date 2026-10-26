@@ -448,8 +448,6 @@ void RequestThread::handleRequest(CameraRequest& request, int64_t applyingSeq) {
         effectSeq = mLastEffectSeq + 1;
     }
     // Reprocessing case, don't run 3A.
-    bool isReprocess = (request.mBuffer[0]->s.streamType == CAMERA_STREAM_INPUT) &&
-                       IS_INPUT_BUFFER(request.mBuffer[0]->timestamp, request.mBuffer[0]->sequence);
 #ifdef LINUX_PRIVACY_MODE
     // Dummy frames carry no statistics, so skip 3A/CCA entirely and just hand out a
     // monotonic effectSeq. Their leftover timestamp/sequence must also not be mistaken
@@ -459,9 +457,9 @@ void RequestThread::handleRequest(CameraRequest& request, int64_t applyingSeq) {
         effectSeq = ++mLastEffectSeq;
         LOG2("%s: Backup-mode request: seq %ld, out buffer %d", __func__,
              effectSeq, request.mBufferNum);
-    } else if (isReprocess) {
+    } else if (IS_INPUT_BUFFER(request.mBuffer[0]->timestamp, request.mBuffer[0]->sequence)) {
 #else
-    if (isReprocess) {
+    if (IS_INPUT_BUFFER(request.mBuffer[0]->timestamp, request.mBuffer[0]->sequence)) {
 #endif
         effectSeq = request.mBuffer[0]->sequence;
         LOG2("%s: Reprocess request: seq %ld, out buffer %d", __func__,

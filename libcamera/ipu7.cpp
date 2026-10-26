@@ -1243,8 +1243,7 @@ void IPU7CameraData::handleEvent(EventData eventData) {
     switch (eventData.type) {
         case EVENT_PROCESS_REQUEST: {
             const EventRequestData& request = eventData.data.request;
-            if (!((request.buffer[0]->s.streamType == CAMERA_STREAM_INPUT) &&
-                  IS_INPUT_BUFFER(request.buffer[0]->timestamp, request.buffer[0]->sequence))) {
+            if (!IS_INPUT_BUFFER(request.buffer[0]->timestamp, request.buffer[0]->sequence)) {
                 auto cameraContext = CameraContext::getInstance(mCameraId);
                 auto dataContext = cameraContext->getDataContextBySeq(request.settingSeq);
                 // Set test pattern mode
