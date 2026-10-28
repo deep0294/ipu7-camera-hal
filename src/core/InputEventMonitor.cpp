@@ -22,6 +22,9 @@
 
 #include <string>
 #include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -46,7 +49,25 @@ static const uint8_t U32_BITS = sizeof(uint32_t) * 8;
 // The kernel copies event bitmaps in whole longs, so a bitmap sized exactly for SW_MAX or
 // EV_MAX is too small. KEY_MAX is the largest bitmap and its size is a multiple of a long.
 static const uint32_t BITMAP_WORDS = (KEY_MAX / U32_BITS) + 1U;
-static const size_t PHYS_PATH_MAX_LEN = 256;
+static const char VIRTUAL_INPUT_SYSFS_PREFIX[] = "/sys/devices/virtual/";
+
+/*
+ * Input devices created from user space (uinput) have no parent device, so the kernel
+ * always places them under /sys/devices/virtual/. A driver for a real switch attaches the
+ * input device to its own device. User space cannot change this location, unlike the
+ * name, phys or bus type.
+ */
+static bool hasParentDevice(const char *eventName) {
+    char resolved[PATH_MAX] = {0};
+    const std::string sysPath = std::string("/sys/class/input/") + eventName;
+
+    if (realpath(sysPath.c_str(), resolved) == nullptr) {
+        return false;
+    }
+
+    return strncmp(resolved, VIRTUAL_INPUT_SYSFS_PREFIX,
+                   sizeof(VIRTUAL_INPUT_SYSFS_PREFIX) - 1U) != 0;
+}
 
 InputEventMonitor::InputEventMonitor() : mCheckThread(nullptr),
                                          mEventType(-1),
@@ -104,20 +125,7 @@ int InputEventMonitor::configure(int eventType, int eventCode) {
         if (strncmp(entry->d_name, "event", 5) == 0) {
             std::string devicePath = std::string("/dev/input/") + entry->d_name;
 
-            int tmpFd = ::open(devicePath.c_str(), O_RDONLY);
-            if (tmpFd < 0) {
-                LOGE("open %s fail: %d, errno: %d", devicePath.c_str(), tmpFd, errno);
-                continue;
-            }
-            char physPath[PHYS_PATH_MAX_LEN] = {0};
-            bool isVirtual = (ioctl(tmpFd, EVIOCGPHYS(sizeof(physPath)), physPath) < 0)
-                             || (physPath[0] == '\0');
-            struct input_id inputId = {};
-            if (!isVirtual && (ioctl(tmpFd, EVIOCGID, &inputId) < 0)) {
-                isVirtual = true;
-            }
-            ::close(tmpFd);
-            if (isVirtual || (inputId.bustype == BUS_VIRTUAL)) {
+            if (!hasParentDevice(entry->d_name)) {
                 LOG1("Skip virtual device %s", devicePath.c_str());
                 continue;
             }
