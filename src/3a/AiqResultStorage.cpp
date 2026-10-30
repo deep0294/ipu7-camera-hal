@@ -71,8 +71,7 @@ void AiqResultStorage::resetAiqResults() {
 
     mCurrentIndex = -1;
     for (int i = 0; i < kStorageSize; i++) {
-        mAiqResults[i]->mSequence = -1;
-        mAiqResults[i]->mFrameId = 0;
+        mAiqResults[i]->invalidate();
     }
 }
 #endif
